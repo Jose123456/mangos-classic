@@ -181,6 +181,9 @@ bool WorldSocket::ProcessIncomingData()
 
     sLog.outWorldPacketDump(GetRemoteEndpoint().c_str(), pct->GetOpcode(), pct->GetOpcodeName(), pct, true);
 
+    bool l_success = true;
+    // Delete pct unless we hand it off to WorldSession
+    bool l_shouldDelete = true;
     try
     {
         switch (opcode)
@@ -189,30 +192,37 @@ bool WorldSocket::ProcessIncomingData()
                 if (m_session)
                 {
                     sLog.outError("WorldSocket::ProcessIncomingData: Player send CMSG_AUTH_SESSION again");
-                    return false;
+                    l_success = false;
                 }
-
-                return HandleAuthSession(*pct);
+                else
+                {
+                    l_success = HandleAuthSession(*pct);
+                }
+                break;
 
             case CMSG_PING:
-                return HandlePing(*pct);
+                l_success = HandlePing(*pct);
+                break;
 
             case CMSG_KEEP_ALIVE:
                 DEBUG_LOG("CMSG_KEEP_ALIVE ,size: " SIZEFMTD " ", pct->size());
 
-                return true;
+                break;
 
             default:
             {
                 if (!m_session)
                 {
                     sLog.outError("WorldSocket::ProcessIncomingData: Client not authed opcode = %u", uint32(opcode));
-                    return false;
+                    l_success = false;
                 }
-
-                m_session->QueuePacket(pct);
-
-                return true;
+                else
+                {
+                    m_session->QueuePacket(pct);
+                    // pct will be deleted in WorldSession::Update or by the
+                    // WorldSession destructor
+                    l_shouldDelete = false;
+                }
             }
         }
     }
@@ -232,11 +242,14 @@ bool WorldSocket::ProcessIncomingData()
             DETAIL_LOG("Disconnecting session [account id %i / address %s] for badly formatted packet.",
                        m_session ? m_session->GetAccountId() : -1, GetRemoteAddress().c_str());
 
-            return false;
+            l_success =  false;
         }
     }
-
-    return true;
+    if (l_shouldDelete)
+    {
+        delete pct;
+    }
+    return l_success;
 }
 
 bool WorldSocket::HandleAuthSession(WorldPacket &recvPacket)
