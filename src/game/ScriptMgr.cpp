@@ -2377,6 +2377,9 @@ ScriptLoadResult ScriptMgr::LoadScriptLibrary(const char* libName)
     m_hScriptLib = MANGOS_LOAD_LIBRARY(name.c_str());
 
     if (!m_hScriptLib)
+        m_hScriptLib = MANGOS_LOAD_STATIC_LIBRARY();
+
+    if (!m_hScriptLib)
         return SCRIPT_LOAD_ERR_NOT_FOUND;
 
 #   define GET_SCRIPT_HOOK_PTR(P,N)             \

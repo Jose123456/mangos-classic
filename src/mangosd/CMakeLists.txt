@@ -63,12 +63,23 @@ add_executable(${EXECUTABLE_NAME}
 
 add_dependencies(${EXECUTABLE_NAME} revision.h)
 
+if(UNIX)
+  if(APPLE)
+    set(SCRIPTDEV2 -Wl,-force_load scriptdev2)
+  else()
+    set(SCRIPTDEV2 -Wl,-whole-archive scriptdev2 -Wl,-no-whole-archive)
+  endif()
+else()
+  set(SCRIPTDEV2 scriptdev2)
+endif()
+
 target_link_libraries(${EXECUTABLE_NAME}
   game
   shared
   framework
   g3dlite
   gsoap
+  ${SCRIPTDEV2}
   ${Boost_LIBRARIES}
 )
 

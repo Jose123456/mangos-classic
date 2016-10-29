@@ -49,6 +49,7 @@ typedef HMODULE MANGOS_LIBRARY_HANDLE;
 #  define MANGOS_SCRIPT_SUFFIX ".dll"
 #  define MANGOS_SCRIPT_PREFIX ""
 #  define MANGOS_LOAD_LIBRARY(libname)     LoadLibraryA(libname)
+#  define MANGOS_LOAD_STATIC_LIBRARY()     NULL
 #  define MANGOS_CLOSE_LIBRARY(hlib)       FreeLibrary(hlib)
 #  define MANGOS_GET_PROC_ADDR(hlib, name) GetProcAddress(hlib, name)
 #  define MANGOS_EXPORT __declspec(dllexport)
@@ -57,6 +58,7 @@ typedef HMODULE MANGOS_LIBRARY_HANDLE;
 #  include <dlfcn.h>
 typedef void* MANGOS_LIBRARY_HANDLE;
 #  define MANGOS_LOAD_LIBRARY(libname)     dlopen(libname, RTLD_LAZY)
+#  define MANGOS_LOAD_STATIC_LIBRARY()     dlopen(NULL, RTLD_LAZY)
 #  define MANGOS_CLOSE_LIBRARY(hlib)       dlclose(hlib)
 #  define MANGOS_GET_PROC_ADDR(hlib, name) dlsym(hlib, name)
 #  define MANGOS_EXPORT export
