@@ -20,6 +20,10 @@ set(LIBRARY_NAME game)
 
 add_definitions(-DDT_POLYREF64)
 
+if(APPLE)
+  add_definitions(-D__ASSERT_MACROS_DEFINE_VERSIONS_WITHOUT_UNDERSCORES=0)
+endif()
+
 # include external dependencies libs headers (warnings disabled)
 include_directories(SYSTEM
   ${CMAKE_SOURCE_DIR}/dep/include/g3dlite

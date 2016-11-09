@@ -23,7 +23,7 @@
 #include "Log.h"
 #include "World.h"
 
-#include "../recastnavigation/Detour/Include/DetourCommon.h"
+#include "../../recastnavigation/Detour/Include/DetourCommon.h"
 #include "../recastnavigation/Detour/Include/DetourMath.h"
 
 ////////////////// PathFinder //////////////////
