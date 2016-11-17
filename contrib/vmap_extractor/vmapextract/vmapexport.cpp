@@ -32,6 +32,10 @@
 #include <sys/stat.h>
 #endif
 
+#if defined __APPLE__
+#define fopen64 fopen
+#endif
+
 #undef min
 #undef max
 
