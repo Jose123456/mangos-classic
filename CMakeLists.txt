@@ -14,6 +14,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program; if not, write to the Free Software
 # Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+#
 
 project(CMaNGOS)
 
@@ -94,7 +95,6 @@ endif()
 set(CMAKE_INSTALL_RPATH ../${LIBS_FOLDER_NAME})
 set(CMAKE_INSTALL_NAME_DIR ${LIBS_DIR})
 
-# Find needed packages and if necessery abort if something important is missing
 find_package(Boost REQUIRED COMPONENTS system program_options thread)
 
 if(Boost_FOUND)
@@ -127,6 +127,16 @@ if(UNIX)
     find_package(MySQL REQUIRED)
   endif()
 
+  # If OpenSSL path isn't specified on mac we set the one that homebrew uses
+  # since that's what most people will be using.
+  if (${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
+    if (NOT OPENSSL_ROOT_DIR)
+      set(OPENSSL_ROOT_DIR /usr/local/opt/openssl/)
+    endif()
+    if (NOT OPENSSL_INCLUDE_DIR)
+      set(OPENSSL_INCLUDE_DIR /usr/local/opt/openssl/include)
+    endif()
+  endif()
   find_package(OpenSSL REQUIRED)
   find_package(ZLIB REQUIRED)
 endif()
