@@ -18,98 +18,101 @@
 
 #include <string>
 #include <memory>
+#include <mutex>
 #include <vector>
 #include <functional>
 
-#include <boost/asio.hpp>
-#include <boost/date_time/posix_time/posix_time_types.hpp>
-#include <boost/lexical_cast.hpp>
+#include <arpa/inet.h>
+
+#include <event2/buffer.h>
+#include <event2/bufferevent.h>
 
 #include "Socket.hpp"
 #include "Log.h"
 
 using namespace MaNGOS;
 
-Socket::Socket(boost::asio::io_service &service, std::function<void (Socket *)> closeHandler)
-    : m_socket(service), m_address("0.0.0.0"), m_outBufferFlushTimer(service),
-      m_closeHandler(closeHandler), m_writeState(WriteState::Idle), m_readState(ReadState::Idle) {}
-
-bool Socket::Open()
+Socket::Socket(struct event_base *base, evutil_socket_t fd, struct sockaddr *address,
+        std::function<void (Socket *)> closeHandler) : m_closeHandler(closeHandler)
 {
-    try
-    {
-        const_cast<std::string &>(m_address) = m_socket.remote_endpoint().address().to_string();
-        const_cast<std::string &>(m_remoteEndpoint) = boost::lexical_cast<std::string>(m_socket.remote_endpoint());
-    }
-    catch (boost::system::error_code& error)
-    {
-        sLog.outError("Socket::Open() failed to get remote address.  Error: %s", error.message().c_str());
-        return false;
-    }
+    char ip[INET6_ADDRSTRLEN] = {0};
+    sockaddr_in *addr = reinterpret_cast<sockaddr_in *>(address);
+    std::string saddr = inet_ntop(AF_INET, &addr->sin_addr, ip, INET6_ADDRSTRLEN);
+    const_cast<std::string &>(m_address) = saddr;
+    const_cast<std::string &>(m_remoteEndpoint) = saddr + ':' + std::to_string(addr->sin_port);
 
-    m_outBuffer.reset(new PacketBuffer);
-    m_secondaryOutBuffer.reset(new PacketBuffer);
-    m_inBuffer.reset(new PacketBuffer);
-
-    StartAsyncRead();
-
-    return true;
+    m_bev = bufferevent_socket_new(base, fd, BEV_OPT_CLOSE_ON_FREE | BEV_OPT_THREADSAFE);
+    bufferevent_setcb(m_bev, Socket::ReadCallback, NULL, Socket::EventCallback, this);
+    bufferevent_enable(m_bev, EV_READ|EV_WRITE);
 }
+//sLog.outBasic("Socket::OnError.  %s.  Connection closed.", error.message().c_str());
 
 void Socket::Close()
 {
-    assert(!IsClosed());
+    //Don't grab any locks if this is already null. It can't ever not be null again
+    if (m_bev == nullptr) return;
 
-    boost::system::error_code ec;
-    m_socket.shutdown(boost::asio::ip::tcp::socket::shutdown_both, ec);
-    m_socket.close();
+    std::lock_guard<std::mutex> readGuard(m_readLock);
+    std::lock_guard<std::mutex> writeGuard(m_writeLock);
+
+    //Someone beat us to it
+    if (m_bev == nullptr) return;
+
+    //Lock the event loop. We're going to null out the m_bev reference
+    //this prevents a race with the static callback methods
+    bufferevent_lock(m_bev);
+    bufferevent_disable(m_bev, EV_READ|EV_WRITE);
+    //Remove both callbacks
+    bufferevent_setcb(m_bev, NULL, NULL, NULL, NULL);
+    struct bufferevent *l_bev = m_bev;
+    m_bev = nullptr;
+    bufferevent_unlock(m_bev);
+
+    bufferevent_free(l_bev);
 
     if (m_closeHandler)
         m_closeHandler(this);
 }
 
-void Socket::StartAsyncRead()
+bool Socket::IsClosed()
 {
-    if (IsClosed())
-    {
-        m_readState = ReadState::Idle;
-        return;
-    }
+    //Don't grab any locks if this is already null. It can't ever not be null again
+    if( m_bev == nullptr ) return true;
 
-    m_readState = ReadState::Reading;
-    m_socket.async_read_some(boost::asio::buffer(&m_inBuffer->m_buffer[m_inBuffer->m_writePosition], m_inBuffer->m_buffer.size() - m_inBuffer->m_writePosition),
-                             [this](const boost::system::error_code &error, size_t length) { this->OnRead(error, length); });
+    std::lock_guard<std::mutex> readGuard(m_readLock);
+
+    return(m_bev == nullptr);
 }
 
-void Socket::OnRead(const boost::system::error_code &error, size_t length)
+void Socket::EventCallback(struct bufferevent *bev, short events, void *ctx)
 {
-    if (error)
-    {
-        m_readState = ReadState::Idle;
-        OnError(error);
-        return;
+    bufferevent_lock(bev);
+    Socket *sock = static_cast<Socket *> (ctx);
+    assert(sock->m_bev == bev);
+    bufferevent_unlock(bev);
+
+    // skip logging this code because it happens whenever anyone disconnects.  reduces spam.
+    if (events & (BEV_EVENT_EOF | BEV_EVENT_ERROR)) {
+            sock->Close();
+    } else {
+        sLog.outError("Socket::EventCallback() unknown event %04x", events);
     }
+}
 
-    if (IsClosed())
-    {
-        m_readState = ReadState::Idle;
-        return;
-    }
+void Socket::ReadCallback(struct bufferevent *bev, void *ctx)
+{
+    bufferevent_lock(bev);
+    Socket *sock = static_cast<Socket *> (ctx);
+    assert(sock->m_bev == bev);
+    bufferevent_unlock(bev);
 
-    m_inBuffer->m_writePosition += length;
+    sock->ReadCallback();
+}
 
-    const size_t available = m_socket.available();
-
-    // if there is still data to read, increase the buffer size and do so (if necessary)
-    if (available > 0 && (length + available) > m_inBuffer->m_buffer.size())
-    {
-        m_inBuffer->m_buffer.resize(m_inBuffer->m_buffer.size() + available);
-        StartAsyncRead();
-        return;
-    }
-
+void Socket::ReadCallback()
+{
     // we must repeat this in case we have read in multiple messages from the client
-    while (m_inBuffer->m_readPosition < m_inBuffer->m_writePosition)
+    while (ReadLengthRemaining() > 0)
     {
         if (!ProcessIncomingData())
         {
@@ -117,180 +120,94 @@ void Socket::OnRead(const boost::system::error_code &error, size_t length)
             // specified in the header goes past what we've read.  in this case, we will reset the buffer with the remaining data 
             if (errno == EBADMSG)
             {
-                const size_t bytesRemaining = m_inBuffer->m_writePosition - m_inBuffer->m_readPosition;
-
-                // first, check to see if we can fit the remaining bytes at the absolute start of the existing input buffer.
-                // if we can, it will save us a re-allocation
-                if (m_inBuffer->m_readPosition >= bytesRemaining)
-                    memcpy(&m_inBuffer->m_buffer[0], &m_inBuffer->m_buffer[m_inBuffer->m_readPosition], bytesRemaining);
-                // otherwise, we cannot perform a simple memcpy as the source and destination ranges would overlap,
-                // which leads to undefined behavior.  we must create a new buffer, and insert it in place of the input buffer
-                else
-                {
-                    std::vector<uint8> temporaryBuffer(m_inBuffer->m_buffer.size());
-
-                    memcpy(&temporaryBuffer[0], &m_inBuffer->m_buffer[m_inBuffer->m_readPosition], bytesRemaining);
-
-                    m_inBuffer->m_buffer = std::move(temporaryBuffer);
-                }
-
-                m_inBuffer->m_readPosition = 0;
-                m_inBuffer->m_writePosition = bytesRemaining;
-
-                StartAsyncRead();
+                sLog.outError("Socket::ReadCallback incomplete read!!!");
+                //Close()?
             }
-            else if (!IsClosed())
-                Close();
-
             return;
         }
     }
-
-    // at this point, the packet has been read and successfully processed.  reset the buffer.
-    m_inBuffer->m_writePosition = m_inBuffer->m_readPosition = 0;
-
-    StartAsyncRead();
-}
-
-void Socket::OnError(const boost::system::error_code &error)
-{
-    // skip logging this code because it happens whenever anyone disconnects.  reduces spam.
-    if (error != boost::asio::error::eof &&
-        error != boost::asio::error::operation_aborted)
-        sLog.outBasic("Socket::OnError.  %s.  Connection closed.", error.message().c_str());
-
-    if (!IsClosed())
-        Close();
 }
 
 bool Socket::Read(char *buffer, int length)
 {
-    if (ReadLengthRemaining() < length)
+    //Don't grab any locks if this is already null. It can't ever not be null again
+    if (m_bev == nullptr) return false;
+
+    std::lock_guard<std::mutex> readGuard(m_readLock);
+
+    //Someone closed this connection while we were blocked
+    if (m_bev == nullptr) return false;
+
+    struct evbuffer *input = bufferevent_get_input(m_bev);
+
+    if (evbuffer_get_length(input) < length)
         return false;
 
-    m_inBuffer->Read(buffer, length);
+    size_t read = bufferevent_read(m_bev, buffer, length);
+    assert(static_cast<int>(read) == length);
+
     return true;
 }
 
 void Socket::Write(const char *buffer, int length)
 {
-    std::lock_guard<std::mutex> guard(m_mutex);
+    //Don't grab any locks if this is already null. It can't ever not be null again
+    if(m_bev == nullptr) return;
 
-    switch (m_writeState)
-    {
-        case WriteState::Idle:
-            m_outBuffer->Write(buffer, length);
-            StartWriteFlushTimer();
-            break;
+    std::lock_guard<std::mutex> guard(m_writeLock);
 
-        case WriteState::Buffering:
-            m_outBuffer->Write(buffer, length);
-            break;
+    //Someone closed this connection while we were blocked
+    if(m_bev == nullptr) return;
 
-        case WriteState::Sending:
-            m_secondaryOutBuffer->Write(buffer, length);
-            break;
-
-        default:
-            assert(false);
-    }
+    bufferevent_write(m_bev, buffer, length);
 }
 
-// note that this function assumes that the socket mutex is locked
-void Socket::StartWriteFlushTimer()
+int Socket::ReadLengthRemaining()
 {
-    if (m_writeState == WriteState::Buffering)
-        return;
+    //Don't grab any locks if this is already null. It can't ever not be null again
+    if( m_bev == nullptr ) return 0;
 
-    // if the socket is closed, silently fail
-    if (IsClosed())
-    {
-        m_writeState = WriteState::Idle;
-        return;
-    }
+    std::lock_guard<std::mutex> readGuard(m_readLock);
 
-    m_writeState = WriteState::Buffering;
+    //Someone closed this connection while we were blocked
+    if(m_bev == nullptr) return 0;
 
-    m_outBufferFlushTimer.expires_from_now(boost::posix_time::milliseconds(BufferTimeout));
-    m_outBufferFlushTimer.async_wait([this](const boost::system::error_code &error) { this->FlushOut(); });
+    struct evbuffer *input = bufferevent_get_input(m_bev);
+
+    return (evbuffer_get_length(input));
 }
 
-void Socket::FlushOut()
+void Socket::ReadSkip(int length)
 {
-    // if the socket is closed, silently fail
-    if (IsClosed())
-    {
-        m_writeState = WriteState::Idle;
-        return;
-    }
+    //Don't grab any locks if this is already null. It can't ever not be null again
+    if (m_bev == nullptr) return;
 
-    std::lock_guard<std::mutex> guard(m_mutex);
+    std::lock_guard<std::mutex> readGuard(m_readLock);
 
-    assert(m_writeState == WriteState::Buffering);
+    //Someone closed this connection while we were blocked
+    if (m_bev == nullptr) return;
 
-    // at this point we are guarunteed that there is data to send in the primary buffer.  send it.
-    m_writeState = WriteState::Sending;
-
-    m_socket.async_write_some(boost::asio::buffer(m_outBuffer->m_buffer, m_outBuffer->m_writePosition),
-        [this](const boost::system::error_code &error, size_t length) { this->OnWriteComplete(error, length); });
+    struct evbuffer *input = bufferevent_get_input(m_bev);
+    evbuffer_drain(input, length);
 }
 
-// if the write state is idle, this will do nothing, which is correct
-// if the write state is sending, this will do nothing, which is correct
-// if the write state is buffering, this will cancel the running timer, which will immediately trigger FlushOut()
-void Socket::ForceFlushOut()
+const uint8 *Socket::InPeek()
 {
-    m_outBufferFlushTimer.cancel();
-}
+    //Don't grab any locks if this is already null. It can't ever not be null again
+    if (m_bev == nullptr) return nullptr;
 
-void Socket::OnWriteComplete(const boost::system::error_code &error, size_t length)
-{
-    // we must check this before locking the mutex because the connection will be closed,
-    // which leads to a locked mutex being destroyed.  not good!
-    if (error)
-    {
-        OnError(error);
-        return;
-    }
+    std::lock_guard<std::mutex> readGuard(m_readLock);
 
-    if (IsClosed())
-    {
-        m_writeState = WriteState::Idle;
-        return;
-    }
+    //Someone closed this connection while we were blocked
+    if (m_bev == nullptr) return nullptr;
 
-    std::lock_guard<std::mutex> guard(m_mutex);
+    struct evbuffer *input = bufferevent_get_input(m_bev);
 
-    assert(m_writeState == WriteState::Sending);
-    assert(length <= m_outBuffer->m_writePosition);
+    if (evbuffer_get_length(input) < 1)
+            return nullptr;
 
-    // if there is data left to write, move it to the start of the buffer
-    if (length < m_outBuffer->m_writePosition)
-    {
-        std::copy(&m_outBuffer->m_buffer[length], &m_outBuffer->m_buffer[m_outBuffer->m_writePosition], m_outBuffer->m_buffer.begin());
-        m_outBuffer->m_writePosition -= length;
-    }
-    // if not, reset the write pointer
-    else
-        m_outBuffer->m_writePosition = 0;
-
-    // if there is data in the secondary buffer, append it to the primary buffer
-    if (m_secondaryOutBuffer->m_writePosition > 0)
-    {
-        // do we have enough space? if not, resize
-        if (m_outBuffer->m_buffer.size() < (m_outBuffer->m_writePosition + m_secondaryOutBuffer->m_writePosition))
-            m_outBuffer->m_buffer.resize(m_outBuffer->m_writePosition + m_secondaryOutBuffer->m_writePosition);
-
-        std::copy(&m_secondaryOutBuffer->m_buffer[0], &m_secondaryOutBuffer->m_buffer[m_secondaryOutBuffer->m_writePosition], &m_outBuffer->m_buffer[m_outBuffer->m_writePosition]);
-
-        m_outBuffer->m_writePosition += m_secondaryOutBuffer->m_writePosition;
-        m_secondaryOutBuffer->m_writePosition = 0;
-    }
-
-    // if there is any data to write, do so immediately
-    if (m_outBuffer->m_writePosition > 0)
-        m_socket.async_write_some(boost::asio::buffer(m_outBuffer->m_buffer, m_outBuffer->m_writePosition),
-            [this](const boost::system::error_code &error, size_t length) { this->OnWriteComplete(error, length); });
-    else
-        m_writeState = WriteState::Idle;
+    struct evbuffer_iovec v[1];
+    evbuffer_peek(input, 1, NULL, v, 1);
+    uint8 *firstByte = reinterpret_cast<uint8 *>(v[0].iov_base);
+    return firstByte;
 }

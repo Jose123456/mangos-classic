@@ -23,24 +23,51 @@
 #include <thread>
 #include <vector>
 
-#include <boost/asio.hpp>
+#include <arpa/inet.h>
+
+#include <event2/listener.h>
 
 #include "NetworkThread.hpp"
 
 namespace MaNGOS
 {
     template <typename SocketType>
+    class Listener;
+
+    //Does global libevent initialization
+    class ListenerFactory
+    {
+    public:
+        ListenerFactory()
+        {
+            event_enable_debug_mode();
+            if (mangos_libevent_threads() != 0)
+            {
+                throw std::runtime_error("Couldn't initialize libevent threads");
+            }
+            //TODO fix spelling when libevent 2.1 becomes available
+            evthread_enable_lock_debuging();
+        }
+        template <typename SocketType>
+        std::unique_ptr<Listener<SocketType>> GetListener(const std::string &bind_ip, int port, int workerThreads)
+        {
+            return std::unique_ptr<Listener<SocketType>>(
+                    new Listener<SocketType>(bind_ip, port, workerThreads)
+                    );
+        }
+    };
+
+    template <typename SocketType>
     class Listener
     {
+        friend class ListenerFactory;
         private:
-            boost::asio::io_service m_service;
-            boost::asio::ip::tcp::acceptor m_acceptor;
+            struct event_base *m_base;
+            struct evconnlistener *m_listener;
+            struct sockaddr_in m_sin;
 
             std::thread m_acceptorThread;
             std::vector<std::unique_ptr<NetworkThread<SocketType>>> m_workerThreads;
-
-            // the time in milliseconds to sleep a worker thread at the end of each tick
-            const int SleepInterval = 100;
 
             NetworkThread<SocketType> *SelectWorker() const
             {
@@ -61,55 +88,83 @@ namespace MaNGOS
                 return m_workerThreads[minIndex].get();
             }
             
-            void BeginAccept();
-            void OnAccept(NetworkThread<SocketType> *worker, SocketType *socket, const boost::system::error_code &ec);
-
+            static void AcceptCallback(struct evconnlistener *listener, evutil_socket_t fd,
+                    struct sockaddr *address, int socklen, void *ctx);
+            static void AcceptErrorCallback(struct evconnlistener *listener, void *ctx);
+            Listener(const std::string &bind_ip, int port, int workerThreads);
         public:
-            Listener(int port, int workerThreads);
             ~Listener();
     };
 
     template <typename SocketType>
-    Listener<SocketType>::Listener(int port, int workerThreads)
-        : m_acceptor(m_service, boost::asio::ip::tcp::endpoint(boost::asio::ip::tcp::v4(), port))
+    Listener<SocketType>::Listener(const std::string &bind_ip, int port, int workerThreads)
     {
         m_workerThreads.reserve(workerThreads);
         for (int i = 0; i < workerThreads; ++i)
             m_workerThreads.push_back(std::unique_ptr<NetworkThread<SocketType>>(new NetworkThread<SocketType>));
 
-        BeginAccept();
+        m_base = event_base_new();
+        if (!m_base)
+        {
+            throw std::runtime_error("Couldn't create an event base");
+        }
 
-        m_acceptorThread = std::thread([this]() { this->m_service.run(); });
+        /* Clear the sockaddr before using it, in case there are extra
+         * platform-specific fields that can mess us up. */
+        memset(&m_sin, 0, sizeof(m_sin));
+        /* This is an INET address */
+        m_sin.sin_family = AF_INET;
+        /* Listen on bind_ip */
+        if( inet_aton(bind_ip.c_str(), &(m_sin.sin_addr)) == 0 )
+        {
+            throw new std::runtime_error("Invalid BindIP");
+        }
+        /* Listen on the given port. */
+        m_sin.sin_port = htons(port);
+
+        m_listener = evconnlistener_new_bind(m_base, Listener::AcceptCallback, this,
+                LEV_OPT_CLOSE_ON_FREE | LEV_OPT_REUSEABLE, -1, (struct sockaddr*) &m_sin,
+                sizeof(m_sin));
+        if (!m_listener)
+        {
+            event_base_free(m_base);
+            throw std::runtime_error("Couldn't create listener");
+        }
+        evconnlistener_set_error_cb(m_listener, Listener::AcceptErrorCallback);
+
+        m_acceptorThread = std::thread([&]() { event_base_dispatch(m_base); });
     }
 
-    // FIXME - is this needed?
     template <typename SocketType>
     Listener<SocketType>::~Listener()
     {
-        m_service.stop();
-        m_acceptor.close();
+        event_base_loopbreak(m_base);
         m_acceptorThread.join();
+        evconnlistener_free(m_listener);
+        event_base_free(m_base);
     }
 
     template <typename SocketType>
-    void Listener<SocketType>::BeginAccept()
+    void Listener<SocketType>::AcceptCallback(struct evconnlistener *listener, evutil_socket_t fd,
+            struct sockaddr *address, int socklen, void *ctx)
     {
-        NetworkThread<SocketType> *worker = SelectWorker();
-        SocketType *socket = worker->CreateSocket();
+        Listener *sock = static_cast<Listener *> (ctx);
 
-        m_acceptor.async_accept(socket->GetAsioSocket(), [this,worker,socket](const boost::system::error_code &ec) { this->OnAccept(worker, socket, ec); });
+        NetworkThread<SocketType> *worker = sock->SelectWorker();
+        worker->CreateSocket(fd, address);
     }
 
     template <typename SocketType>
-    void Listener<SocketType>::OnAccept(NetworkThread<SocketType> *worker, SocketType *socket, const boost::system::error_code &ec)
+    void Listener<SocketType>::AcceptErrorCallback(struct evconnlistener *listener, void *ctx)
     {
-        // an error has occurred
-        if (ec)
-            worker->RemoveSocket(socket);
-        else
-            socket->Open();
+        struct event_base *base = evconnlistener_get_base(listener);
+        Listener *sock = static_cast<Listener *> (ctx);
+        assert(sock->m_base == base);
 
-        BeginAccept();
+        int err = EVUTIL_SOCKET_ERROR();
+        sLog.outError("Listener<SocketType>::AcceptErrorCallback() error %d (%s). Shutting down.",
+                err, evutil_socket_error_to_string(err));
+        event_base_loopbreak(base);
     }
 }
 

@@ -96,6 +96,7 @@ set(CMAKE_INSTALL_NAME_DIR ${LIBS_DIR})
 
 # Find needed packages and if necessery abort if something important is missing
 find_package(Boost REQUIRED COMPONENTS system program_options thread)
+find_package(Libevent2 REQUIRED)
 
 if(Boost_FOUND)
   include_directories(${Boost_INCLUDE_DIRS})

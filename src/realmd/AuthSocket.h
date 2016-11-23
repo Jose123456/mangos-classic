@@ -30,7 +30,7 @@
 
 #include "Network/Socket.hpp"
 
-#include <boost/asio.hpp>
+#include <event2/event.h>
 
 #include <functional>
 
@@ -39,7 +39,8 @@ class AuthSocket : public MaNGOS::Socket
     public:
         const static int s_BYTE_SIZE = 32;
 
-        AuthSocket(boost::asio::io_service &service, std::function<void (Socket *)> closeHandler);
+        AuthSocket(struct event_base *base, evutil_socket_t fd, struct sockaddr *address,
+                std::function<void (Socket *)> closeHandler);
 
         void SendProof(Sha1Hash sha);
         void LoadRealmlist(ByteBuffer& pkt, uint32 acctid);

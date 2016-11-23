@@ -54,10 +54,25 @@ struct ServerPktHeader
 #pragma pack(pop)
 #endif
 
-WorldSocket::WorldSocket(boost::asio::io_service &service, std::function<void (Socket *)> closeHandler)
-    : Socket(service, closeHandler), m_lastPingTime(std::chrono::system_clock::time_point::min()), m_overSpeedPings(0),
+WorldSocket::WorldSocket(struct event_base *base, evutil_socket_t fd, struct sockaddr *address,
+        std::function<void (Socket *)> closeHandler)
+    : Socket(base, fd, address, closeHandler), m_lastPingTime(std::chrono::system_clock::time_point::min()), m_overSpeedPings(0),
       m_useExistingHeader(false), m_session(nullptr), m_seed(urand())
-{}
+{
+    // Send startup packet.
+    WorldPacket packet(SMSG_AUTH_CHALLENGE, 40);
+    packet << m_seed;
+
+    BigNumber seed1;
+    seed1.SetRand(16 * 8);
+    packet.append(seed1.AsByteArray(16), 16);               // new encryption seeds
+
+    BigNumber seed2;
+    seed2.SetRand(16 * 8);
+    packet.append(seed2.AsByteArray(16), 16);               // new encryption seeds
+
+    SendPacket(packet);
+}
 
 void WorldSocket::SendPacket(const WorldPacket& pct, bool immediate)
 {
@@ -81,31 +96,6 @@ void WorldSocket::SendPacket(const WorldPacket& pct, bool immediate)
 
     if (!!pct.size())
         Write(reinterpret_cast<const char *>(pct.contents()), pct.size());
-
-    if (immediate)
-        ForceFlushOut();
-}
-
-bool WorldSocket::Open()
-{
-    if (!Socket::Open())
-        return false;
-
-    // Send startup packet.
-    WorldPacket packet(SMSG_AUTH_CHALLENGE, 40);
-    packet << m_seed;
-
-    BigNumber seed1;
-    seed1.SetRand(16 * 8);
-    packet.append(seed1.AsByteArray(16), 16);               // new encryption seeds
-
-    BigNumber seed2;
-    seed2.SetRand(16 * 8);
-    packet.append(seed2.AsByteArray(16), 16);               // new encryption seeds
-
-    SendPacket(packet);
-
-    return true;
 }
 
 bool WorldSocket::ProcessIncomingData()
@@ -171,7 +161,7 @@ bool WorldSocket::ProcessIncomingData()
 
     if (validBytesRemaining)
     {
-        pct->append(InPeak(), validBytesRemaining);
+        pct->append(InPeek(), validBytesRemaining);
         ReadSkip(validBytesRemaining);
     }
 

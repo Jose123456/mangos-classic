@@ -23,12 +23,11 @@
 #include <string>
 #include <mutex>
 #include <functional>
+#include <assert.h>
 
-#include <boost/asio.hpp>
+#include <event2/event.h>
 
 #include "Platform/Define.h"
-
-#include "PacketBuffer.hpp"
 
 namespace MaNGOS
 {
@@ -39,41 +38,16 @@ namespace MaNGOS
             // ingame but increase bandwidth efficiency by reducing tcp overhead.
             static const int BufferTimeout = 50;
 
-            enum class WriteState
-            {
-                Idle,       // no write operation is currently underway
-                Buffering,  // a write operation has been performed, and we are currently awaiting others before sending
-                Sending,    // a send operation is underway
-            };
-
-            enum class ReadState
-            {
-                Idle,
-                Reading
-            };
-
-            WriteState m_writeState;
-            ReadState m_readState;
-
-            boost::asio::ip::tcp::socket m_socket;
+            struct bufferevent *m_bev;
 
             std::function<void(Socket *)> m_closeHandler;
 
-            std::unique_ptr<PacketBuffer> m_inBuffer;
-            std::unique_ptr<PacketBuffer> m_outBuffer;
-            std::unique_ptr<PacketBuffer> m_secondaryOutBuffer;
+            std::mutex m_readLock;
+            std::mutex m_writeLock;
 
-            std::mutex m_mutex;
-            boost::asio::deadline_timer m_outBufferFlushTimer;
-
-            void StartAsyncRead();
-            void OnRead(const boost::system::error_code &error, size_t length);
-
-            void StartWriteFlushTimer();
-            void OnWriteComplete(const boost::system::error_code &error, size_t length);
-            void FlushOut();
-
-            void OnError(const boost::system::error_code &error);
+            static void EventCallback(struct bufferevent *bev, short events, void *ctx);
+            static void ReadCallback(struct bufferevent *bev, void *ctx);
+            void ReadCallback();
 
         protected:
             const std::string m_address;
@@ -81,28 +55,22 @@ namespace MaNGOS
 
             virtual bool ProcessIncomingData() = 0;
 
-            const uint8 *InPeak() const { return &m_inBuffer->m_buffer[m_inBuffer->m_readPosition]; }
+            const uint8 *InPeek();
 
-            int ReadLengthRemaining() const { return m_inBuffer->ReadLengthRemaining(); }
-
-            void ForceFlushOut();
+            int ReadLengthRemaining();
 
         public:
-            Socket(boost::asio::io_service &service, std::function<void (Socket *)> closeHandler);
-            virtual ~Socket() { assert(Deletable()); }
+            Socket(struct event_base *base, evutil_socket_t fd, struct sockaddr *address,
+                    std::function<void (Socket *)> closeHandler);
+            virtual ~Socket() { assert(IsClosed()); }
 
-            virtual bool Open();
             void Close();
-
-            bool IsClosed() const { return !m_socket.is_open(); }
-            virtual bool Deletable() const { return IsClosed(); }
+            bool IsClosed();
 
             bool Read(char *buffer, int length);
-            void ReadSkip(int length) { m_inBuffer->Read(nullptr, length); }
+            void ReadSkip(int length);
 
             void Write(const char *buffer, int length);
-
-            boost::asio::ip::tcp::socket &GetAsioSocket() { return m_socket; }
 
             const std::string &GetRemoteEndpoint() const { return m_remoteEndpoint; }
             const std::string &GetRemoteAddress() const { return m_address; }

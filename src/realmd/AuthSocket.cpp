@@ -154,8 +154,9 @@ typedef struct AuthHandler
 #endif
 
 /// Constructor - set the N and g values for SRP6
-AuthSocket::AuthSocket(boost::asio::io_service &service, std::function<void (Socket *)> closeHandler)
-    : Socket(service, closeHandler), _status(STATUS_CHALLENGE), _build(0), _accountSecurityLevel(SEC_PLAYER)
+AuthSocket::AuthSocket(struct event_base *base, evutil_socket_t fd, struct sockaddr *address,
+        std::function<void (Socket *)> closeHandler)
+    : Socket(base, fd, address, closeHandler), _status(STATUS_CHALLENGE), _build(0), _accountSecurityLevel(SEC_PLAYER)
 {
     N.SetHexStr("894B645E89E1535BBDAD5B8B290650530801B18EBFBF5E8FAB3C82872A3E9BB7");
     g.SetDword(7);
@@ -183,7 +184,7 @@ bool AuthSocket::ProcessIncomingData()
     // which presumably the client will never do, but lets support it anyway! \o/
     while (ReadLengthRemaining() > 0)
     {
-        const eAuthCmd cmd = static_cast<eAuthCmd>(*InPeak());
+        const eAuthCmd cmd = static_cast<eAuthCmd>(*InPeek());
         int i;
 
         ///- Circle through known commands and call the correct command handler

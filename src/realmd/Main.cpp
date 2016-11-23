@@ -225,8 +225,10 @@ int main(int argc, char *argv[])
     auto rmport = sConfig.GetIntDefault("RealmServerPort", DEFAULT_REALMSERVER_PORT);
     std::string bind_ip = sConfig.GetStringDefault("BindIP", "0.0.0.0");
 
+    MaNGOS::ListenerFactory listenerFac;
     // FIXME - more intelligent selection of thread count is needed here.  config option?
-    MaNGOS::Listener<AuthSocket> listener(rmport, 1);
+    std::unique_ptr<MaNGOS::Listener<AuthSocket>> listener =
+                    listenerFac.GetListener<AuthSocket>(bind_ip, rmport, 1);
 
     ///- Catch termination signals
     HookSignals();

@@ -75,11 +75,9 @@ set(SRC_GRP_LOG
 )
 
 set(SRC_GRP_NETWORK
-    Network/PacketBuffer.cpp
     Network/Socket.cpp
     Network/Listener.hpp
     Network/NetworkThread.hpp
-    Network/PacketBuffer.hpp
     Network/Socket.hpp
 )
 

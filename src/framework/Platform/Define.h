@@ -25,15 +25,13 @@
 
 #include <sys/types.h>
 
+#include <event2/thread.h>
+
 #define MANGOS_LITTLEENDIAN 0
 #define MANGOS_BIGENDIAN    1
 
 #if !defined(MANGOS_ENDIAN)
-#  if defined (ACE_BIG_ENDIAN)
-#    define MANGOS_ENDIAN MANGOS_BIGENDIAN
-#  else // ACE_BYTE_ORDER != ACE_BIG_ENDIAN
-#    define MANGOS_ENDIAN MANGOS_LITTLEENDIAN
-#  endif // ACE_BYTE_ORDER
+#  define MANGOS_ENDIAN MANGOS_LITTLEENDIAN
 #endif // MANGOS_ENDIAN
 
 #define MANGOS_SCRIPT_NAME "mangosscript"
@@ -122,5 +120,11 @@ typedef std::uint8_t uint8;
 #endif
 
 typedef uint64 OBJECT_HANDLE;
+
+#if PLATFORM == PLATFORM_WINDOWS
+#  define mangos_libevent_threads evthread_use_windows_threads
+#else
+#  define mangos_libevent_threads evthread_use_pthreads
+#endif
 
 #endif // MANGOS_DEFINE_H

@@ -122,19 +122,16 @@ class WorldSocket : public MaNGOS::Socket
         bool HandlePing(WorldPacket &recvPacket);
 
     public:
-        WorldSocket(boost::asio::io_service &service, std::function<void (Socket *)> closeHandler);
+        WorldSocket(struct event_base *base, evutil_socket_t fd, struct sockaddr *address,
+                std::function<void (Socket *)> closeHandler);
 
         // send a packet \o/
         void SendPacket(const WorldPacket& pct, bool immediate = false);
 
         void ClearSession() { m_session = nullptr; }
 
-        virtual bool Open() override;
-        virtual bool Deletable() const override { return !m_session && Socket::Deletable(); }
-
         /// Return the session key
         BigNumber &GetSessionKey() { return m_s; }
-
 };
 
 #endif  /* _WORLDSOCKET_H */

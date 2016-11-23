@@ -36,8 +36,9 @@
 #include <string>
 
 /// RASocket constructor
-RASocket::RASocket(boost::asio::io_service &service, std::function<void(Socket *)> closeHandler) :
-    m_secure(sConfig.GetBoolDefault("RA.Secure", true)), MaNGOS::Socket(service, closeHandler),
+RASocket::RASocket(struct event_base *base, evutil_socket_t fd, struct sockaddr *address,
+        std::function<void(Socket *)> closeHandler) :
+    m_secure(sConfig.GetBoolDefault("RA.Secure", true)), MaNGOS::Socket(base, fd, address, closeHandler),
     m_authLevel(AuthLevel::None), m_accountId(0), m_accountLevel(AccountTypes::SEC_PLAYER)
 {
     if (sConfig.IsSet("RA.Stricted"))
@@ -47,19 +48,6 @@ RASocket::RASocket(boost::asio::io_service &service, std::function<void(Socket *
     }
     else
         m_restricted = sConfig.GetBoolDefault("RA.Restricted", true);
-}
-
-/// RASocket destructor
-RASocket::~RASocket()
-{
-    sLog.outRALog("Connection was closed.");
-}
-
-/// Accept an incoming connection
-bool RASocket::Open()
-{
-    if (!Socket::Open())
-        return false;
 
     sLog.outRALog("Incoming connection from %s.", m_address.c_str());
 
@@ -67,8 +55,12 @@ bool RASocket::Open()
     Send(sWorld.GetMotd());
     Send("\r\n");
     Send(sObjectMgr.GetMangosStringForDBCLocale(LANG_RA_USER));
+}
 
-    return true;
+/// RASocket destructor
+RASocket::~RASocket()
+{
+    sLog.outRALog("Connection was closed.");
 }
 
 /// Read data from the network

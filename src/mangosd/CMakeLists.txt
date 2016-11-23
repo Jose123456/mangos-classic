@@ -70,6 +70,7 @@ target_link_libraries(${EXECUTABLE_NAME}
   g3dlite
   gsoap
   ${Boost_LIBRARIES}
+  event
 )
 
 if(WIN32)
@@ -91,6 +92,7 @@ if(UNIX)
     ${OPENSSL_LIBRARIES}
     ${OPENSSL_EXTRA_LIBRARIES}
     ${ZLIB_LIBRARIES}
+    event_pthreads
   )
 endif()
 

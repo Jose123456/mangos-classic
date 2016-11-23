@@ -51,6 +51,7 @@ target_link_libraries(${EXECUTABLE_NAME}
   shared
   framework
   ${Boost_LIBRARIES}
+  event
 )
 
 if(WIN32)
@@ -70,6 +71,7 @@ if(UNIX)
     ${MYSQL_LIBRARY}
     ${OPENSSL_LIBRARIES}
     ${OPENSSL_EXTRA_LIBRARIES}
+    event_pthreads
   )
 endif()
 

@@ -26,7 +26,7 @@
 #include <atomic>
 #include <utility>
 
-#include <boost/asio.hpp>
+#include <event2/event.h>
 
 #include "Socket.hpp"
 
@@ -38,16 +38,13 @@ namespace MaNGOS
         private:
             static const int WorkDelay;
 
-            boost::asio::io_service m_service;
+            struct event_base *m_base;
 
             std::mutex m_socketLock;
             // most people think that you should always use a vector rather than a list, but i believe that this is an exception
             // because this collection can potentially get rather large and we will frequently be removing elements at an arbitrary
             // position within it.
             std::list<std::unique_ptr<SocketType>> m_sockets;
-
-            // note that the work member *must* be declared after the service member for the work constructor to function correctly
-            boost::asio::io_service::work m_work;
 
             std::mutex m_closingSocketLock;
             std::list<std::unique_ptr<SocketType>> m_closingSockets;
@@ -60,11 +57,24 @@ namespace MaNGOS
             void SocketCleanupWork();
 
         public:
-            NetworkThread() : m_work(m_service), m_pendingShutdown(false),
-                m_serviceThread([this] { boost::system::error_code ec; this->m_service.run(ec); }),
+            NetworkThread() : m_pendingShutdown(false),
                 m_socketCleanupThread([this] { this->SocketCleanupWork(); })
             {
-                m_serviceThread.detach();
+                m_base = event_base_new();
+                if (!m_base)
+                {
+                    throw std::runtime_error("Couldn't create an event base");
+                }
+                m_serviceThread = std::thread([&]()
+                {
+                    //TODO Replace this whole mess with event_base_loop(m_base, EVLOOP_NO_EXIT_ON_EMPTY)
+                    //once libevent 2.1 is available
+                    while (!m_pendingShutdown)
+                    {
+                        event_base_dispatch(m_base);
+                        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                    }
+                });
             }
 
             ~NetworkThread()
@@ -81,11 +91,14 @@ namespace MaNGOS
 
                 m_pendingShutdown = true;
                 m_socketCleanupThread.join();
+                event_base_loopbreak(m_base);
+                m_serviceThread.join();
+                event_base_free(m_base);
             }
 
             size_t Size() const { return m_sockets.size(); }
 
-            SocketType *CreateSocket();
+            void CreateSocket(evutil_socket_t fd, struct sockaddr *address);
 
             void RemoveSocket(Socket *socket)
             {
@@ -116,7 +129,7 @@ namespace MaNGOS
 
             for (auto i = m_closingSockets.begin(); i != m_closingSockets.end(); )
             {
-                if ((*i)->Deletable())
+                if ((*i)->IsClosed())
                     i = m_closingSockets.erase(i);
                 else
                     ++i;
@@ -125,13 +138,15 @@ namespace MaNGOS
     }
 
     template <typename SocketType>
-    SocketType *NetworkThread<SocketType>::CreateSocket()
+    void NetworkThread<SocketType>::CreateSocket(evutil_socket_t fd, struct sockaddr *address)
     {
         std::lock_guard<std::mutex> guard(m_socketLock);
 
-        m_sockets.push_front(std::unique_ptr<SocketType>(new SocketType(m_service, [this](Socket *socket) { this->RemoveSocket(socket); })));
-
-        return m_sockets.begin()->get();
+        m_sockets.push_front(
+                std::unique_ptr<SocketType>(
+                        new SocketType(m_base, fd, address, [this](Socket *socket) { this->RemoveSocket(socket); })
+                )
+        );
     }
 }
 
